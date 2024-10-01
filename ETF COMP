@@ -1,0 +1,410 @@
+!pip install Flask yfinance pandas pyngrok alpha_vantage
+import os
+os.environ['ALPHAVANTAGE_API_KEY'] = '54G8IYAS3VYCM06N'  # Replace with your actual API key
+  # Replace with your actual API key
+
+# Import necessary libraries
+from flask import Flask, render_template_string, request
+import yfinance as yf
+import pandas as pd
+from pyngrok import ngrok
+from alpha_vantage.timeseries import TimeSeries
+import os
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Retrieve the API key from environment variables
+api_key = os.environ.get('ALPHAVANTAGE_API_KEY')
+
+# Initialize TimeSeries with your API key
+ts = TimeSeries(key=api_key, output_format='pandas')
+
+# Function to fetch and calculate ETF data (1-year and 5-year returns)
+def get_etf_performance(ticker):
+    etf = yf.Ticker(ticker)
+    hist = etf.history(period="5y")
+    if hist.empty or len(hist) < 252:
+        return None
+    price_5_years_ago = hist['Close'].iloc[0]
+    price_1_year_ago = hist['Close'].iloc[-252]
+    current_price = hist['Close'].iloc[-1]
+    five_year_return = ((current_price / price_5_years_ago) - 1) * 100
+    one_year_return = ((current_price / price_1_year_ago) - 1) * 100
+    # Get analyst rating
+    analyst_rating = get_analyst_rating(ticker)
+    # Backtest result
+    backtest_result = backtest_etf(ticker)
+    return {
+        'Ticker': ticker,
+        'Current Price': round(current_price, 2),
+        'Price 1 Year Ago': round(price_1_year_ago, 2),
+        'Price 5 Years Ago': round(price_5_years_ago, 2),
+        '1-Year Return (%)': round(one_year_return, 2),
+        '5-Year Return (%)': round(five_year_return, 2),
+        'Analyst Rating': analyst_rating,
+        'Backtest Result': backtest_result
+    }
+
+def get_analyst_rating(ticker):
+    etf = yf.Ticker(ticker)
+    try:
+        rating = etf.recommendations
+        if rating is not None and not rating.empty:
+            latest_rating = rating.iloc[-1]
+            return {
+                'Firm': latest_rating.name[0],
+                'To Grade': latest_rating['To Grade'],
+                'From Grade': latest_rating['From Grade'],
+                'Action': latest_rating['Action'],
+                'Date': latest_rating.name[1].strftime('%Y-%m-%d')
+            }
+        else:
+            return 'No analyst ratings available.'
+    except Exception as e:
+        return 'Error fetching analyst ratings.'
+
+def backtest_etf(ticker, investment_amount=1000, start_date='2018-01-01'):
+    etf = yf.Ticker(ticker)
+    hist = etf.history(start=start_date)
+    if hist.empty:
+        return None
+    start_price = hist['Close'].iloc[0]
+    end_price = hist['Close'].iloc[-1]
+    shares = investment_amount / start_price
+    end_value = shares * end_price
+    return {
+        'Investment Amount': investment_amount,
+        'Start Date': start_date,
+        'End Date': hist.index[-1].strftime('%Y-%m-%d'),
+        'Start Price': round(start_price, 2),
+        'End Price': round(end_price, 2),
+        'Shares Purchased': round(shares, 4),
+        'End Value': round(end_value, 2),
+        'Total Return (%)': round(((end_value / investment_amount) - 1) * 100, 2)
+    }
+
+def get_economic_calendar():
+    # Placeholder data
+    events = [
+        {'Date': '2023-10-01', 'Event': 'Non-Farm Payrolls', 'Impact': 'High'},
+        {'Date': '2023-10-05', 'Event': 'Fed Interest Rate Decision', 'Impact': 'High'},
+        {'Date': '2023-10-12', 'Event': 'CPI Inflation Rate', 'Impact': 'Medium'},
+    ]
+    return events
+
+# Home route - Form to enter ETF tickers
+@app.route('/')
+def index():
+    return '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>ETF Comparison Tool</title>
+        <!-- Google Fonts -->
+        <link href="https://fonts.googleapis.com/css?family=Lato&display=swap" rel="stylesheet">
+        <!-- Bootstrap CSS -->
+        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+        <style>
+            body {
+                padding-top: 50px;
+                font-family: 'Lato', sans-serif;
+                background-color: #f8f9fa;
+            }
+            .container {
+                max-width: 800px;
+            }
+            .btn-primary {
+                background-color: #0056b3;
+                border-color: #0056b3;
+            }
+            .btn-primary:hover {
+                background-color: #004085;
+                border-color: #004085;
+            }
+            h1, h3 {
+                color: #004085;
+            }
+            label {
+                color: #004085;
+            }
+            .table thead th {
+                background-color: #e9ecef;
+            }
+            .positive {
+                color: green;
+            }
+            .negative {
+                color: red;
+            }
+            .navbar {
+                background-color: #004085;
+            }
+            .navbar-brand, .nav-link, .navbar-text {
+                color: white !important;
+            }
+        </style>
+    </head>
+    <body>
+        <nav class="navbar navbar-expand-lg">
+            <a class="navbar-brand" href="#">YourBrandName</a>
+        </nav>
+        <div class="container">
+            <h1 class="text-center mt-4">ETF Comparison Tool</h1>
+            <form action="/compare" method="POST" class="mt-4">
+                <div class="form-group">
+                    <label for="tickers">Enter two ETF tickers (comma separated):</label>
+                    <input type="text" id="tickers" name="tickers" class="form-control" placeholder="e.g., SPY, VTI" required>
+                </div>
+                <div class="form-group">
+                    <label for="investment">Investment Amount for Backtesting ($):</label>
+                    <input type="number" id="investment" name="investment" class="form-control" value="1000" required>
+                </div>
+                <div class="form-group">
+                    <label for="start_date">Backtesting Start Date (YYYY-MM-DD):</label>
+                    <input type="date" id="start_date" name="start_date" class="form-control" value="2018-01-01" required>
+                </div>
+                <button type="submit" class="btn btn-primary btn-block">Compare ETFs</button>
+            </form>
+        </div>
+    </body>
+    </html>
+    '''
+
+# ETF comparison route - Handle form data and display comparison
+@app.route('/compare', methods=['POST'])
+def compare():
+    tickers = request.form['tickers']
+    investment_amount = float(request.form.get('investment', 1000))
+    start_date = request.form.get('start_date', '2018-01-01')
+    etf_tickers = [ticker.strip().upper() for ticker in tickers.split(',')]
+    if len(etf_tickers) != 2:
+        return '''
+        <div class="container">
+            <h3 class="text-danger">Please enter exactly two ETF tickers.</h3>
+            <a href="/" class="btn btn-secondary mt-3">Back to Home</a>
+        </div>
+        '''
+    # Fetch data for both ETFs
+    etf1_data = get_etf_performance(etf_tickers[0])
+    etf2_data = get_etf_performance(etf_tickers[1])
+    if etf1_data is None or etf2_data is None:
+        return '''
+        <div class="container">
+            <h3 class="text-danger">Data not available for one or both ETFs. Please check the ticker symbols.</h3>
+            <a href="/" class="btn btn-secondary mt-3">Back to Home</a>
+        </div>
+        '''
+    # Economic Calendar
+    economic_events = get_economic_calendar()
+    # Comparison message
+    diff_1y = round(etf1_data['1-Year Return (%)'] - etf2_data['1-Year Return (%)'], 2)
+    diff_5y = round(etf1_data['5-Year Return (%)'] - etf2_data['5-Year Return (%)'], 2)
+    comparison_message = f"""
+    <p>Over 1 year, <strong>{etf1_data['Ticker']}</strong> is {'higher' if diff_1y > 0 else 'lower'} than <strong>{etf2_data['Ticker']}</strong> by <strong>{abs(diff_1y)}%</strong>.</p>
+    <p>Over 5 years, <strong>{etf1_data['Ticker']}</strong> is {'higher' if diff_5y > 0 else 'lower'} than <strong>{etf2_data['Ticker']}</strong> by <strong>{abs(diff_5y)}%</strong>.</p>
+    """
+    # Render results
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>ETF Comparison Results</title>
+        <!-- Google Fonts -->
+        <link href="https://fonts.googleapis.com/css?family=Lato&display=swap" rel="stylesheet">
+        <!-- Bootstrap CSS -->
+        <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
+        <!-- Chart.js -->
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body {
+                padding-top: 50px;
+                font-family: 'Lato', sans-serif;
+                background-color: #f8f9fa;
+            }
+            .container {
+                max-width: 900px;
+            }
+            .table thead th {
+                background-color: #e9ecef;
+            }
+            .positive {
+                color: green;
+            }
+            .negative {
+                color: red;
+            }
+            h1, h3 {
+                color: #004085;
+            }
+            .navbar {
+                background-color: #004085;
+            }
+            .navbar-brand, .nav-link, .navbar-text {
+                color: white !important;
+            }
+        </style>
+    </head>
+    <body>
+        <nav class="navbar navbar-expand-lg">
+            <a class="navbar-brand" href="#">YourBrandName</a>
+        </nav>
+        <div class="container">
+            <h1 class="text-center">ETF Comparison Results</h1>
+            <div class="mt-4">
+                {{ comparison_message | safe }}
+            </div>
+            <div class="row mt-4">
+                <div class="col-md-6">
+                    <h3>{{ etf1_data['Ticker'] }} Performance</h3>
+                    <table class="table table-bordered">
+                        <thead>
+                            <tr>
+                                <th>Metric</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Current Price</td><td>${{ etf1_data['Current Price'] }}</td></tr>
+                            <tr><td>Price 1 Year Ago</td><td>${{ etf1_data['Price 1 Year Ago'] }}</td></tr>
+                            <tr><td>1-Year Return (%)</td><td class="{{ 'positive' if etf1_data['1-Year Return (%)'] >= 0 else 'negative' }}">{{ etf1_data['1-Year Return (%)'] }}%</td></tr>
+                            <tr><td>Price 5 Years Ago</td><td>${{ etf1_data['Price 5 Years Ago'] }}</td></tr>
+                            <tr><td>5-Year Return (%)</td><td class="{{ 'positive' if etf1_data['5-Year Return (%)'] >= 0 else 'negative' }}">{{ etf1_data['5-Year Return (%)'] }}%</td></tr>
+                        </tbody>
+                    </table>
+                    <h4>Analyst Rating</h4>
+                    {% if etf1_data['Analyst Rating'] != 'No analyst ratings available.' and etf1_data['Analyst Rating'] != 'Error fetching analyst ratings.' %}
+                        <p>Firm: {{ etf1_data['Analyst Rating']['Firm'] }}</p>
+                        <p>Action: {{ etf1_data['Analyst Rating']['Action'] }}</p>
+                        <p>From Grade: {{ etf1_data['Analyst Rating']['From Grade'] }}</p>
+                        <p>To Grade: {{ etf1_data['Analyst Rating']['To Grade'] }}</p>
+                        <p>Date: {{ etf1_data['Analyst Rating']['Date'] }}</p>
+                    {% else %}
+                        <p>{{ etf1_data['Analyst Rating'] }}</p>
+                    {% endif %}
+                    <h4>Backtesting Result</h4>
+                    <p>Investment Amount: ${{ etf1_data['Backtest Result']['Investment Amount'] }}</p>
+                    <p>Start Date: {{ etf1_data['Backtest Result']['Start Date'] }}</p>
+                    <p>End Date: {{ etf1_data['Backtest Result']['End Date'] }}</p>
+                    <p>End Value: ${{ etf1_data['Backtest Result']['End Value'] }}</p>
+                    <p>Total Return: {{ etf1_data['Backtest Result']['Total Return (%)'] }}%</p>
+                </div>
+                <div class="col-md-6">
+                    <h3>{{ etf2_data['Ticker'] }} Performance</h3>
+                    <table class="table table-bordered">
+                        <thead>
+                            <tr>
+                                <th>Metric</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>Current Price</td><td>${{ etf2_data['Current Price'] }}</td></tr>
+                            <tr><td>Price 1 Year Ago</td><td>${{ etf2_data['Price 1 Year Ago'] }}</td></tr>
+                            <tr><td>1-Year Return (%)</td><td class="{{ 'positive' if etf2_data['1-Year Return (%)'] >= 0 else 'negative' }}">{{ etf2_data['1-Year Return (%)'] }}%</td></tr>
+                            <tr><td>Price 5 Years Ago</td><td>${{ etf2_data['Price 5 Years Ago'] }}</td></tr>
+                            <tr><td>5-Year Return (%)</td><td class="{{ 'positive' if etf2_data['5-Year Return (%)'] >= 0 else 'negative' }}">{{ etf2_data['5-Year Return (%)'] }}%</td></tr>
+                        </tbody>
+                    </table>
+                    <h4>Analyst Rating</h4>
+                    {% if etf2_data['Analyst Rating'] != 'No analyst ratings available.' and etf2_data['Analyst Rating'] != 'Error fetching analyst ratings.' %}
+                        <p>Firm: {{ etf2_data['Analyst Rating']['Firm'] }}</p>
+                        <p>Action: {{ etf2_data['Analyst Rating']['Action'] }}</p>
+                        <p>From Grade: {{ etf2_data['Analyst Rating']['From Grade'] }}</p>
+                        <p>To Grade: {{ etf2_data['Analyst Rating']['To Grade'] }}</p>
+                        <p>Date: {{ etf2_data['Analyst Rating']['Date'] }}</p>
+                    {% else %}
+                        <p>{{ etf2_data['Analyst Rating'] }}</p>
+                    {% endif %}
+                    <h4>Backtesting Result</h4>
+                    <p>Investment Amount: ${{ etf2_data['Backtest Result']['Investment Amount'] }}</p>
+                    <p>Start Date: {{ etf2_data['Backtest Result']['Start Date'] }}</p>
+                    <p>End Date: {{ etf2_data['Backtest Result']['End Date'] }}</p>
+                    <p>End Value: ${{ etf2_data['Backtest Result']['End Value'] }}</p>
+                    <p>Total Return: {{ etf2_data['Backtest Result']['Total Return (%)'] }}%</p>
+                </div>
+            </div>
+            <div class="mt-5">
+                <h3 class="text-center">Performance Comparison Chart</h3>
+                <canvas id="comparisonChart" width="800" height="400"></canvas>
+            </div>
+            <h3 class="mt-5">Upcoming Economic Events</h3>
+            <table class="table table-bordered">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Event</th>
+                        <th>Impact</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for event in economic_events %}
+                    <tr>
+                        <td>{{ event['Date'] }}</td>
+                        <td>{{ event['Event'] }}</td>
+                        <td>{{ event['Impact'] }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            <div class="text-center mt-4">
+                <a href="/" class="btn btn-primary">Back to Home</a>
+            </div>
+        </div>
+        <!-- Chart.js Script -->
+        <script>
+            var ctx = document.getElementById('comparisonChart').getContext('2d');
+            var comparisonChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['1-Year Return (%)', '5-Year Return (%)'],
+                    datasets: [{
+                        label: '{{ etf1_data['Ticker'] }}',
+                        data: [{{ etf1_data['1-Year Return (%)'] }}, {{ etf1_data['5-Year Return (%)'] }}],
+                        backgroundColor: 'rgba(0, 86, 179, 0.6)',
+                        borderColor: 'rgba(0, 86, 179, 1)',
+                        borderWidth: 1
+                    },
+                    {
+                        label: '{{ etf2_data['Ticker'] }}',
+                        data: [{{ etf2_data['1-Year Return (%)'] }}, {{ etf2_data['5-Year Return (%)'] }}],
+                        backgroundColor: 'rgba(128, 128, 128, 0.6)',
+                        borderColor: 'rgba(128, 128, 128, 1)',
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        yAxes: [{
+                            ticks: {
+                                callback: function(value) { return value + "%"; },
+                                beginAtZero: true
+                            },
+                            scaleLabel: {
+                                display: true,
+                                labelString: 'Return (%)'
+                            }
+                        }]
+                    },
+                    tooltips: {
+                        callbacks: {
+                            label: function(tooltipItem, data) {
+                                return data.datasets[tooltipItem.datasetIndex].label + ': ' + tooltipItem.yLabel + '%';
+                            }
+                        }
+                    }
+                }
+            });
+        </script>
+    </body>
+    </html>
+    ''', etf1_data=etf1_data, etf2_data=etf2_data, comparison_message=comparison_message, economic_events=economic_events)
+
+# Start Flask in Colab and expose it with ngrok
+if __name__ == '__main__':
+    # Open a tunnel on port 5000 to the internet
+    public_url = ngrok.connect(5000)
+    print(' * Tunnel URL:', public_url)
+    # Run Flask app
+    app.run(port=5000)
